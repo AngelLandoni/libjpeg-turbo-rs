@@ -12,7 +12,10 @@ pub mod aarch64;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
 
-#[cfg(target_arch = "wasm32")]
+// Each function of this module enables simd128 on itself. LLVM gives the features of one function
+// to every function of its codegen unit, so a build with neither the `simd` feature nor simd128
+// would still hold SIMD instructions, and a browser without WebAssembly SIMD refuses the module.
+#[cfg(all(target_arch = "wasm32", any(feature = "simd", target_feature = "simd128")))]
 pub mod wasm32;
 
 /// Function-pointer dispatch table for SIMD-accelerated decode operations.
