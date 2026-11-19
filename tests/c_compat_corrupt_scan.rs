@@ -1,6 +1,7 @@
-//! A scan that ends before its last MCU decodes as C libjpeg-turbo decodes it: the MCU in which
-//! the data ends decodes from zero bits, and every MCU after it holds zero coefficients, which a
-//! baseline file shows as mid gray.
+//! A corrupt scan decodes as C libjpeg-turbo decodes it. A scan that ends before its last MCU: the
+//! MCU in which the data ends decodes from zero bits, and every MCU after it holds zero
+//! coefficients, which a baseline file shows as mid gray. A code that no Huffman table holds: it
+//! is symbol 0 after 17 bits, and the decode goes on.
 
 use libjpeg_turbo_rs::{compress, decompress, Decoder, PixelFormat, Subsampling};
 
@@ -56,5 +57,25 @@ fn a_scan_cut_short_decodes_its_missing_mcus_to_gray() {
             data[data.len() - row..].iter().all(|&sample| sample == 128),
             "{name}: the last row is mid gray"
         );
+    }
+}
+
+#[test]
+fn a_code_no_table_holds_decodes_on() {
+    let clean: Vec<u8> = compress(&pattern(), SIDE, SIDE, PixelFormat::Rgb, 90, Subsampling::S420)
+        .expect("an encode");
+    let start: usize = scan_start(&clean);
+    let at: usize = start + (clean.len() - 2 - start) / 2;
+    let ones: [u8; 16] = [0xFF, 0x00].repeat(8).try_into().expect("16 bytes");
+    let corrupt: Vec<u8> = [&clean[..at], &ones[..], &clean[at..]].concat();
+
+    let whole: Vec<u8> = decompress(&clean).expect("a clean decode").data;
+    let row: usize = SIDE * 3;
+    for (name, data) in [
+        ("decode", decompress(&corrupt).expect("a decode").data),
+        ("rows", rows_of(&corrupt)),
+    ] {
+        assert_eq!(data.len(), whole.len(), "{name}: the size");
+        assert_eq!(data[..row], whole[..row], "{name}: the first row");
     }
 }

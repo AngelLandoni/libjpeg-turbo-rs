@@ -168,13 +168,12 @@ fn multiscan_noninterleaved_64x64_444_matches_djpeg() {
     );
 }
 
-/// P4-23: lenient mode must be at least as accepting as `djpeg`, which silently
-/// conceals the corrupt entropy here (the stream fragments into spurious
-/// non-interleaved scans, and the non-interleaved decode path hit an invalid
-/// Huffman code). Lenient decode must recover (gray-fill + warning), not reject
-/// — otherwise the differential fuzzer's `(Some, Rejected)` arm panics.
+/// P4-23: `djpeg` silently conceals the corrupt entropy here (the stream fragments into spurious
+/// non-interleaved scans, which hold invalid Huffman codes). C reads an invalid code as symbol 0
+/// after 17 bits and decodes on, with no warning, and so does this decoder, in strict mode as in
+/// lenient mode.
 #[test]
-fn corrupt_huffman_65x65_422_lenient_matches_djpeg() {
+fn corrupt_huffman_65x65_422_matches_djpeg() {
     let Some(djpeg) = djpeg_path() else {
         if is_ci() {
             panic!("P4-23 cross-check requires djpeg in CI");
@@ -183,36 +182,30 @@ fn corrupt_huffman_65x65_422_lenient_matches_djpeg() {
         return;
     };
 
-    // djpeg accepts (exit 0): the drop-in floor requires we also accept.
     let c = decode_with_djpeg(&djpeg, CORRUPT_HUFFMAN_422);
     assert!(c.is_some(), "precondition: djpeg accepts the P4-23 fixture");
     let (cw, ch, cc, c_pixels, _c_warn) = c.unwrap();
     assert_eq!((cw, ch, cc), (65, 65, 3), "djpeg dims");
 
-    let mut decoder = Decoder::new(CORRUPT_HUFFMAN_422).expect("decoder rejected P4-23 header");
-    decoder.set_lenient(true);
-    decoder.set_block_smoothing(true);
-    let img = decoder
-        .decode_image()
-        .expect("P4-23: lenient decode must recover, not reject (drop-in floor)");
-    assert_eq!((img.width, img.height), (65, 65));
-    assert_eq!(img.pixel_format, PixelFormat::Rgb);
-
-    // Lenient recovery must mark itself with at least one warning, so the fuzz
-    // oracle's bilateral-OR lenient gate skips the pixel compare (both sides did
-    // best-effort fill, and the two recovery strategies legitimately differ).
-    // We assert acceptance + dims + warning, not pixels.
-    assert!(
-        !img.warnings.is_empty(),
-        "P4-23: lenient decode must emit a recovery warning (djpeg concealed the corrupt scan)"
-    );
-    let _ = c_pixels;
-
-    // Strict mode must still reject — the recovery is gated on lenient mode.
-    let mut strict = Decoder::new(CORRUPT_HUFFMAN_422).expect("decoder rejected P4-23 header");
-    strict.set_lenient(false);
-    assert!(
-        strict.decode_image().is_err(),
-        "P4-23: strict mode must still reject the corrupt stream"
-    );
+    for lenient in [false, true] {
+        let mut decoder = Decoder::new(CORRUPT_HUFFMAN_422).expect("decoder rejected P4-23 header");
+        decoder.set_lenient(lenient);
+        decoder.set_block_smoothing(true);
+        let img = decoder
+            .decode_image()
+            .unwrap_or_else(|e| panic!("P4-23 (lenient={lenient}): decode must not reject: {e}"));
+        assert_eq!((img.width, img.height), (65, 65));
+        assert_eq!(img.pixel_format, PixelFormat::Rgb);
+        let max_d: i32 = c_pixels
+            .iter()
+            .zip(img.data.iter())
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .max()
+            .unwrap_or(0);
+        // Measured 0: the decode is byte-identical to djpeg. Tolerance 1, as P4-22.
+        assert!(
+            max_d <= 1,
+            "P4-23 (lenient={lenient}): max abs diff {max_d} to djpeg (expected 0; tolerance 1)"
+        );
+    }
 }

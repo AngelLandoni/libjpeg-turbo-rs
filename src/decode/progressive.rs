@@ -157,7 +157,7 @@ pub(crate) fn decode_ac_first_tracked(
         let (symbol, code_len) = if code_len > 0 {
             (symbol, code_len)
         } else {
-            ac_table.lookup(peek)?
+            huffman::lookup_slow(reader, ac_table, peek)
         };
         reader.skip_bits(code_len);
 
@@ -237,7 +237,7 @@ pub(crate) fn decode_ac_refine_tracked(
                 if l > 0 {
                     (s, l)
                 } else {
-                    ac_table.lookup(peek)?
+                    huffman::lookup_slow(reader, ac_table, peek)
                 }
             };
             reader.skip_bits(code_len);

@@ -3,6 +3,23 @@ use crate::common::huffman_table::HuffmanTable;
 use crate::common::quant_table::ZIGZAG_ORDER;
 use crate::decode::bitstream::BitReader;
 
+/// The symbol and the length of the code at the front of `reader` when the fast table holds no
+/// code for `peek`, its next 16 bits. A code that no table holds is symbol 0 after 17 bits, as C
+/// libjpeg-turbo's `HUFF_DECODE_FAST` and `jpeg_huff_decode` read it, so a corrupt scan decodes
+/// on: the bits are taken here, and the length is 0.
+#[cold]
+#[inline(never)]
+pub(crate) fn lookup_slow(reader: &mut BitReader, table: &HuffmanTable, peek: u16) -> (u8, u8) {
+    match table.lookup(peek) {
+        Ok(found) => found,
+        Err(_) => {
+            reader.skip_bits(16);
+            reader.read_bits(1);
+            (0, 0)
+        }
+    }
+}
+
 /// Sign-extend a Huffman extra-bits value (JPEG Figure F.12).
 /// Uses the same branchless formula as C libjpeg-turbo's HUFF_EXTEND:
 ///   result = x + (((x - (1 << (s-1))) >> 31) & ((-1 << s) + 1))
@@ -30,7 +47,11 @@ pub fn decode_dc_coefficient(reader: &mut BitReader, table: &HuffmanTable) -> Re
     let peek = reader.peek_bits(16);
     let (s, l) = table.lookup_fast(peek);
 
-    let (category, code_len) = if l > 0 { (s, l) } else { table.lookup(peek)? };
+    let (category, code_len) = if l > 0 {
+        (s, l)
+    } else {
+        lookup_slow(reader, table, peek)
+    };
     reader.skip_bits(code_len);
 
     if category == 0 {
@@ -129,7 +150,7 @@ pub fn decode_ac_coefficients(
             index += 1;
         } else {
             // Slow path: code longer than LOOKUP_BITS.
-            let (symbol, code_len) = table.lookup(peek)?;
+            let (symbol, code_len) = lookup_slow(reader, table, peek);
             reader.skip_bits(code_len);
 
             let run_length: usize = (symbol >> 4) as usize;
