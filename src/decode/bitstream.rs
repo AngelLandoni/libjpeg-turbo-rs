@@ -284,7 +284,6 @@ impl<'a> BitReader<'a> {
     pub fn reset(&mut self) {
         self.bit_buffer = 0;
         self.bits_left = 0;
-        self.padded = 0;
 
         // Scan forward to the next restart marker (0xFF 0xDn) and consume it.
         //
@@ -308,6 +307,7 @@ impl<'a> BitReader<'a> {
             match self.data[self.pos + 1] {
                 0xD0..=0xD7 => {
                     self.pos += 2; // consume the restart marker
+                    self.padded = 0;
                     return;
                 }
                 0x00 => self.pos += 2, // stuffed literal 0xFF data byte
@@ -332,7 +332,6 @@ impl<'a> BitReader<'a> {
     pub fn reset_and_consume_rst(&mut self) -> Option<u8> {
         self.bit_buffer = 0;
         self.bits_left = 0;
-        self.padded = 0;
 
         // Skip padding 0xFF bytes first (byte stuffing at segment boundaries).
         while self.pos + 1 < self.data.len() && self.data[self.pos] == 0xFF {
@@ -340,6 +339,7 @@ impl<'a> BitReader<'a> {
             if (0xD0..=0xD7).contains(&marker) {
                 let rst_num: u8 = marker - 0xD0;
                 self.pos += 2;
+                self.padded = 0;
                 return Some(rst_num);
             }
             if marker == 0xFF {
@@ -366,13 +366,13 @@ impl<'a> BitReader<'a> {
     pub fn scan_to_next_rst(&mut self) -> Option<u8> {
         self.bit_buffer = 0;
         self.bits_left = 0;
-        self.padded = 0;
         while self.pos + 1 < self.data.len() {
             if self.data[self.pos] == 0xFF {
                 let marker = self.data[self.pos + 1];
                 if (0xD0..=0xD7).contains(&marker) {
                     let rst_num: u8 = marker - 0xD0;
                     self.pos += 2;
+                    self.padded = 0;
                     return Some(rst_num);
                 }
                 if marker == 0x00 {
@@ -411,7 +411,7 @@ impl<'a> BitReader<'a> {
         self.pos
     }
 
-    /// Whether a read took a zero bit past the end of the data, until the next restart or scan:
+    /// Whether a read took a zero bit past the end of the data, until the next RST marker or scan:
     /// C libjpeg-turbo's `insufficient_data`, after which its entropy decoder decodes no block, so
     /// the rest of the scan holds the coefficients it had.
     #[inline(always)]
