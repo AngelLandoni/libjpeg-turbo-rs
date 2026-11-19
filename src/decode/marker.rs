@@ -148,6 +148,10 @@ pub struct MarkerReader<'a> {
     /// Parse-time SOS cap (issue #355): bounds ScanInfo buffering while
     /// markers are read, before any decode-time limit can apply.
     scan_cap: usize,
+    /// Where the marker after the last scan of a progressive frame starts.
+    scanned: Option<usize>,
+    /// Where the markers end, as at EOI, when a marker after the scans failed.
+    end: Option<usize>,
 }
 
 impl<'a> MarkerReader<'a> {
@@ -157,6 +161,8 @@ impl<'a> MarkerReader<'a> {
             pos: 0,
             marker_save_config: MarkerSaveConfig::None,
             scan_cap: DEFAULT_PARSE_SCAN_CAP,
+            scanned: None,
+            end: None,
         }
     }
 
@@ -210,7 +216,29 @@ impl<'a> MarkerReader<'a> {
 
     /// Parse all markers. For baseline, stops after first SOS.
     /// For progressive, reads all SOS markers until EOI.
+    ///
+    /// A marker that fails after a scan of a progressive frame ends the markers there, as EOI
+    /// would, when an EOI marker follows it: the frame decodes from the scans before it. C
+    /// libjpeg-turbo fails such a file, but every coefficient of its scans is there. A file whose
+    /// bytes end before an EOI marker, and a parse limit, still fail.
     pub fn read_markers(&mut self) -> Result<JpegMetadata> {
+        let start: usize = self.pos;
+        self.scanned = None;
+        self.end = None;
+        match self.read_markers_to_end() {
+            Err(error) if !matches!(error, JpegError::LimitExceeded { .. }) => match self.scanned {
+                Some(end) if self.data[end..].windows(2).any(|marker| marker == [0xFF, EOI]) => {
+                    self.pos = start;
+                    self.end = Some(end);
+                    self.read_markers_to_end()
+                }
+                _ => Err(error),
+            },
+            result => result,
+        }
+    }
+
+    fn read_markers_to_end(&mut self) -> Result<JpegMetadata> {
         self.expect_marker(SOI)?;
 
         let mut frame: Option<FrameHeader> = None;
@@ -255,6 +283,12 @@ impl<'a> MarkerReader<'a> {
             }
         };
         loop {
+            if frame.as_ref().is_some_and(|f| f.is_progressive) && !scans.is_empty() {
+                self.scanned = Some(self.pos);
+            }
+            if self.end.is_some_and(|end| self.pos >= end) {
+                break;
+            }
             let marker = self.read_marker()?;
             match marker {
                 SOF0 | SOF1 => {
@@ -498,7 +532,7 @@ impl<'a> MarkerReader<'a> {
                             saved_markers.push(SavedMarker { code: m, data: raw });
                         }
                     }
-                    self.skip_marker_segment()?;
+                    self.skip_variable()?;
                 }
                 // Skip other markers with length
                 m if m != 0x00 && m != 0xFF => {
@@ -691,6 +725,20 @@ impl<'a> MarkerReader<'a> {
         Ok(())
     }
 
+    /// Skip an APPn or COM segment. A length below 2, which counts less than the length field
+    /// itself, is an empty body, as C jdmarker.c `skip_variable` and `save_marker` read it, and
+    /// `read_marker` then skips the bytes the length did not count. Each APPn and COM reader
+    /// follows this rule.
+    fn skip_variable(&mut self) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        let skip = length.saturating_sub(2);
+        if self.pos + skip > self.data.len() {
+            return Err(JpegError::UnexpectedEof);
+        }
+        self.pos += skip;
+        Ok(())
+    }
+
     /// Parse APP0 (JFIF) marker to extract pixel density info,
     /// version bytes, and surface presence so callers don't have to
     /// infer it from density values.
@@ -703,7 +751,7 @@ impl<'a> MarkerReader<'a> {
     ) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("APP0 segment length < 2".into()));
+            return Ok(());
         }
         let end = self.pos + length - 2;
 
@@ -736,7 +784,7 @@ impl<'a> MarkerReader<'a> {
     fn read_com(&mut self, comment: &mut Option<String>) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("COM segment length < 2".into()));
+            return Ok(());
         }
         let text_len = length - 2;
         if self.pos + text_len > self.data.len() {
@@ -753,7 +801,7 @@ impl<'a> MarkerReader<'a> {
     fn read_app14(&mut self, saw_adobe: &mut bool, transform: &mut u8) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("APP14 segment length < 2".into()));
+            return Ok(());
         }
         let end = self.pos + length - 2;
 
@@ -781,7 +829,7 @@ impl<'a> MarkerReader<'a> {
     ) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("APP1 segment length < 2".into()));
+            return Ok(());
         }
         let end = self.pos + length - 2;
         // Clamp the body upper bound to the buffer size: a truncated stream
@@ -839,7 +887,7 @@ impl<'a> MarkerReader<'a> {
     fn read_app13(&mut self, iptc_data: &mut Option<Vec<u8>>) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("APP13 segment length < 2".into()));
+            return Ok(());
         }
         let end = self.pos + length - 2;
         let data_end = end.min(self.data.len());
@@ -895,7 +943,7 @@ impl<'a> MarkerReader<'a> {
     fn read_app2(&mut self, icc_chunks: &mut Vec<IccChunk>) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("APP2 segment length < 2".into()));
+            return Ok(());
         }
         let end = self.pos + length - 2;
 
@@ -1263,6 +1311,58 @@ mod tests {
                 "SOF 0x{sof_byte:02X}: expected is_arithmetic={expected}, got {}",
                 meta.is_arithmetic,
             );
+        }
+    }
+
+    /// A marker that fails after a scan of a progressive frame ends the markers there, and the
+    /// frame keeps its scans. The same marker before the frame fails it.
+    #[test]
+    fn a_bad_marker_after_a_progressive_scan_ends_the_markers() {
+        let jpeg: Vec<u8> = make_minimal_jpeg(0xC2);
+        let eoi: usize = jpeg.len() - 2;
+        let bad: [&[u8]; 4] = [
+            &[0xFF, 0xC4, 0x00, 0x03, 0xFF],
+            &[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x09, 0x00, 0x00, 0x3F, 0x00],
+            &[0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x08, 0x00, 0x08, 0x01, 0x01, 0x11, 0x00],
+            &[0xFF, 0x02, 0xFF, 0xD9],
+        ];
+        for segment in bad {
+            let late: Vec<u8> = [&jpeg[..eoi], segment, &jpeg[eoi..]].concat();
+            let meta: JpegMetadata = MarkerReader::new(&late)
+                .read_markers()
+                .unwrap_or_else(|e| panic!("{segment:02X?} after the scan: {e:?}"));
+            assert_eq!(meta.scans.len(), 1, "{segment:02X?}: the scans before it");
+        }
+        let cut: Vec<u8> = [&jpeg[..eoi], bad[0]].concat();
+        assert!(
+            MarkerReader::new(&cut).read_markers().is_err(),
+            "a bad DHT where the bytes end, with no EOI after it, fails"
+        );
+        let early: Vec<u8> = [&jpeg[..2], bad[1], &jpeg[2..]].concat();
+        assert!(
+            MarkerReader::new(&early).read_markers().is_err(),
+            "a bad SOS before the frame fails"
+        );
+    }
+
+    /// An APPn or COM segment whose length is below 2 is an empty body, as C jdmarker.c
+    /// `skip_variable` and `save_marker` read it, before the frame and after a progressive scan.
+    #[test]
+    fn appn_and_com_with_a_length_below_2_are_empty() {
+        let jpeg: Vec<u8> = make_minimal_jpeg(0xC2);
+        let eoi: usize = jpeg.len() - 2;
+        for code in (0xE0..=0xEF).chain([COM]) {
+            for length in [0x00, 0x01] {
+                let short: [u8; 5] = [0xFF, code, 0x00, length, 0x01];
+                for at in [2, eoi] {
+                    let file: Vec<u8> = [&jpeg[..at], &short[..], &jpeg[at..]].concat();
+                    let result: Result<JpegMetadata> = MarkerReader::new(&file).read_markers();
+                    assert!(
+                        result.is_ok(),
+                        "0x{code:02X} of length {length} at {at}: {result:?}"
+                    );
+                }
+            }
         }
     }
 

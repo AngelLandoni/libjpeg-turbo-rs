@@ -17,6 +17,9 @@ pub struct BitReader<'a> {
     /// checkpoint is unreliable and must be discarded, the window
     /// extended, and the work retried. Never set when `is_final`.
     starved: bool,
+    /// The zero bits the buffer took past the end of the data, at a marker or at the end of the
+    /// bytes. They sit below every real bit, so a read used one once `bits_left` is below them.
+    padded: u32,
 }
 
 /// Resumable byte/bit cursor for windowed decoding (P4-58): captures
@@ -40,6 +43,7 @@ impl<'a> BitReader<'a> {
             bits_left: 0,
             is_final: true,
             starved: false,
+            padded: 0,
         }
     }
 
@@ -55,6 +59,7 @@ impl<'a> BitReader<'a> {
             bits_left: state.bits_left,
             is_final,
             starved: false,
+            padded: 0,
         }
     }
 
@@ -131,6 +136,9 @@ impl<'a> BitReader<'a> {
                             self.fill_buffer_slow(needed);
                             return;
                         }
+                        if next == off {
+                            self.padded = self.padded.saturating_add(8);
+                        }
                         off = next;
                     }
                 };
@@ -163,6 +171,7 @@ impl<'a> BitReader<'a> {
                     }
                     self.bit_buffer <<= 8;
                     self.bits_left += 8;
+                    self.padded = self.padded.saturating_add(8);
                     continue;
                 }
             };
@@ -203,6 +212,7 @@ impl<'a> BitReader<'a> {
                     self.pos = scan - 1;
                     self.bit_buffer <<= 8;
                     self.bits_left += 8;
+                    self.padded = self.padded.saturating_add(8);
                 }
                 None => {
                     // EOF in the middle of (or right after) the FF run.
@@ -218,6 +228,7 @@ impl<'a> BitReader<'a> {
                     }
                     self.bit_buffer <<= 8;
                     self.bits_left += 8;
+                    self.padded = self.padded.saturating_add(8);
                 }
             }
         }
@@ -296,6 +307,7 @@ impl<'a> BitReader<'a> {
             match self.data[self.pos + 1] {
                 0xD0..=0xD7 => {
                     self.pos += 2; // consume the restart marker
+                    self.padded = 0;
                     return;
                 }
                 0x00 => self.pos += 2, // stuffed literal 0xFF data byte
@@ -327,6 +339,7 @@ impl<'a> BitReader<'a> {
             if (0xD0..=0xD7).contains(&marker) {
                 let rst_num: u8 = marker - 0xD0;
                 self.pos += 2;
+                self.padded = 0;
                 return Some(rst_num);
             }
             if marker == 0xFF {
@@ -359,6 +372,7 @@ impl<'a> BitReader<'a> {
                 if (0xD0..=0xD7).contains(&marker) {
                     let rst_num: u8 = marker - 0xD0;
                     self.pos += 2;
+                    self.padded = 0;
                     return Some(rst_num);
                 }
                 if marker == 0x00 {
@@ -389,11 +403,20 @@ impl<'a> BitReader<'a> {
         self.pos = pos;
         self.bit_buffer = 0;
         self.bits_left = 0;
+        self.padded = 0;
     }
 
     /// Return current byte position in the underlying data.
     pub fn position(&self) -> usize {
         self.pos
+    }
+
+    /// Whether a read took a zero bit past the end of the data, until the next RST marker or scan:
+    /// C libjpeg-turbo's `insufficient_data`, after which its entropy decoder decodes no block, so
+    /// the rest of the scan holds the coefficients it had.
+    #[inline(always)]
+    pub fn exhausted(&self) -> bool {
+        self.padded > u32::from(self.bits_left)
     }
 
     /// Returns true if the reader has exhausted all input data.

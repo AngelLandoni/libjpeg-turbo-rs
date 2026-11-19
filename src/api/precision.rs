@@ -1392,7 +1392,11 @@ fn decode_dc_wide(
 ) -> Result<i16> {
     let peek = reader.peek_bits(16);
     let (s, l) = table.lookup_fast(peek);
-    let (category, code_len) = if l > 0 { (s, l) } else { table.lookup(peek)? };
+    let (category, code_len) = if l > 0 {
+        (s, l)
+    } else {
+        crate::decode::huffman::lookup_slow(reader, table, peek)
+    };
     reader.skip_bits(code_len);
     if category == 0 {
         return Ok(0);

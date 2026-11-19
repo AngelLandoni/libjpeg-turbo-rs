@@ -83,13 +83,19 @@ pub fn resolve_mcu_plan<'a>(
 #[derive(Clone)]
 pub struct McuDecoder {
     dc_pred: [i16; 4],
+    /// Whether the reader ran past the end of the data before this MCU: C libjpeg-turbo decodes
+    /// the MCU in which the data ends from zero bits, and no block after it.
+    skip: bool,
 }
 
 impl McuDecoder {
     pub fn new(num_components: usize) -> Self {
         debug_assert!(num_components <= 4);
         let _ = num_components;
-        Self { dc_pred: [0; 4] }
+        Self {
+            dc_pred: [0; 4],
+            skip: false,
+        }
     }
 
     pub fn dc_prediction(&self, component_index: usize) -> i16 {
@@ -98,6 +104,13 @@ impl McuDecoder {
 
     pub fn reset(&mut self) {
         self.dc_pred = [0; 4];
+    }
+
+    /// Start an MCU: its blocks decode to zero coefficients when `reader` ran past the end of the
+    /// data before it.
+    #[inline(always)]
+    pub fn start_mcu(&mut self, reader: &BitReader) {
+        self.skip = reader.exhausted();
     }
 
     /// Decode one 8x8 block of DCT coefficients (in natural/row-major order).
@@ -111,6 +124,9 @@ impl McuDecoder {
         coeffs: &mut [i16; 64],
     ) -> Result<()> {
         *coeffs = [0i16; 64];
+        if self.skip {
+            return Ok(());
+        }
 
         let dc_diff = huffman::decode_dc_coefficient(reader, dc_table)?;
         let dc_pred = &mut self.dc_pred[component_index];
@@ -136,6 +152,7 @@ impl McuDecoder {
         blocks: &mut Vec<[i16; 64]>,
     ) -> Result<()> {
         blocks.clear();
+        self.start_mcu(reader);
 
         for comp_plan in plan {
             for _ in 0..comp_plan.num_blocks {
