@@ -12,7 +12,9 @@
 //!
 //! The mechanism pinned here: an SOS whose component id does not bind to
 //! a distinct frame component must fail marker parsing — that ends the
-//! pathological stream at the first bad scan exactly like C.
+//! pathological stream at the first bad scan exactly like C. After a scan
+//! of a progressive frame, the bad SOS ends the markers as EOI would, and
+//! the frame decodes from the scans before it, where C fails the file.
 //!
 //! Tracked as P4-37 in docs/last_mile/phase4.md.
 
@@ -100,8 +102,8 @@ fn assert_all_paths_reject(source: &[u8], label: &str) {
 }
 
 /// Progressive frame (id 1 only) whose second scan references component
-/// id 2 — the exact shape of the fuzz timeout stream, where the scan was
-/// silently skipped instead of rejected.
+/// id 2 — the exact shape of the fuzz timeout stream, where every later
+/// scan was decoded instead of none.
 fn fixture_progressive_sos_wrong_component_id() -> Vec<u8> {
     let mut jpeg: Vec<u8> = Vec::new();
     jpeg.extend_from_slice(&[0xFF, 0xD8]); // SOI
@@ -131,11 +133,19 @@ fn sos_with_unknown_component_id_is_rejected() {
 }
 
 #[test]
-fn progressive_sos_with_unknown_component_id_is_rejected() {
-    assert_all_paths_reject(
-        &fixture_progressive_sos_wrong_component_id(),
-        "progressive-unknown-id",
+fn progressive_sos_with_unknown_component_id_ends_the_scans() {
+    let source: Vec<u8> = fixture_progressive_sos_wrong_component_id();
+    let coefficients = read_coefficients(&source)
+        .unwrap_or_else(|e| panic!("progressive-unknown-id: read_coefficients: {e:?}"));
+    assert_eq!(
+        coefficients.components.len(),
+        1,
+        "progressive-unknown-id: the frame's component"
     );
+    let image = Decoder::new(&source)
+        .and_then(|d| d.decode_image())
+        .unwrap_or_else(|e| panic!("progressive-unknown-id: decode: {e:?}"));
+    assert_eq!((image.width, image.height), (8, 8));
 }
 
 #[test]
