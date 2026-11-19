@@ -498,7 +498,7 @@ impl<'a> MarkerReader<'a> {
                             saved_markers.push(SavedMarker { code: m, data: raw });
                         }
                     }
-                    self.skip_marker_segment()?;
+                    self.skip_variable()?;
                 }
                 // Skip other markers with length
                 m if m != 0x00 && m != 0xFF => {
@@ -691,6 +691,20 @@ impl<'a> MarkerReader<'a> {
         Ok(())
     }
 
+    /// Skip an APPn or COM segment. A length below 2, which counts less than the length field
+    /// itself, is an empty body, as C jdmarker.c `skip_variable` and `save_marker` read it, and
+    /// `read_marker` then skips the bytes the length did not count. Each APPn and COM reader
+    /// follows this rule.
+    fn skip_variable(&mut self) -> Result<()> {
+        let length = self.read_u16_be()? as usize;
+        let skip = length.saturating_sub(2);
+        if self.pos + skip > self.data.len() {
+            return Err(JpegError::UnexpectedEof);
+        }
+        self.pos += skip;
+        Ok(())
+    }
+
     /// Parse APP0 (JFIF) marker to extract pixel density info,
     /// version bytes, and surface presence so callers don't have to
     /// infer it from density values.
@@ -703,7 +717,7 @@ impl<'a> MarkerReader<'a> {
     ) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("APP0 segment length < 2".into()));
+            return Ok(());
         }
         let end = self.pos + length - 2;
 
@@ -736,7 +750,7 @@ impl<'a> MarkerReader<'a> {
     fn read_com(&mut self, comment: &mut Option<String>) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("COM segment length < 2".into()));
+            return Ok(());
         }
         let text_len = length - 2;
         if self.pos + text_len > self.data.len() {
@@ -753,7 +767,7 @@ impl<'a> MarkerReader<'a> {
     fn read_app14(&mut self, saw_adobe: &mut bool, transform: &mut u8) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("APP14 segment length < 2".into()));
+            return Ok(());
         }
         let end = self.pos + length - 2;
 
@@ -781,7 +795,7 @@ impl<'a> MarkerReader<'a> {
     ) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("APP1 segment length < 2".into()));
+            return Ok(());
         }
         let end = self.pos + length - 2;
         // Clamp the body upper bound to the buffer size: a truncated stream
@@ -839,7 +853,7 @@ impl<'a> MarkerReader<'a> {
     fn read_app13(&mut self, iptc_data: &mut Option<Vec<u8>>) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("APP13 segment length < 2".into()));
+            return Ok(());
         }
         let end = self.pos + length - 2;
         let data_end = end.min(self.data.len());
@@ -895,7 +909,7 @@ impl<'a> MarkerReader<'a> {
     fn read_app2(&mut self, icc_chunks: &mut Vec<IccChunk>) -> Result<()> {
         let length = self.read_u16_be()? as usize;
         if length < 2 {
-            return Err(JpegError::CorruptData("APP2 segment length < 2".into()));
+            return Ok(());
         }
         let end = self.pos + length - 2;
 
@@ -1263,6 +1277,27 @@ mod tests {
                 "SOF 0x{sof_byte:02X}: expected is_arithmetic={expected}, got {}",
                 meta.is_arithmetic,
             );
+        }
+    }
+
+    /// An APPn or COM segment whose length is below 2 is an empty body, as C jdmarker.c
+    /// `skip_variable` and `save_marker` read it, before the frame and after a progressive scan.
+    #[test]
+    fn appn_and_com_with_a_length_below_2_are_empty() {
+        let jpeg: Vec<u8> = make_minimal_jpeg(0xC2);
+        let eoi: usize = jpeg.len() - 2;
+        for code in (0xE0..=0xEF).chain([COM]) {
+            for length in [0x00, 0x01] {
+                let short: [u8; 5] = [0xFF, code, 0x00, length, 0x01];
+                for at in [2, eoi] {
+                    let file: Vec<u8> = [&jpeg[..at], &short[..], &jpeg[at..]].concat();
+                    let result: Result<JpegMetadata> = MarkerReader::new(&file).read_markers();
+                    assert!(
+                        result.is_ok(),
+                        "0x{code:02X} of length {length} at {at}: {result:?}"
+                    );
+                }
+            }
         }
     }
 
