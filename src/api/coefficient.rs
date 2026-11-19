@@ -2787,6 +2787,7 @@ fn decode_baseline_coefficients(
                 mcu_decoder.reset();
             }
 
+            mcu_decoder.start_mcu(&bit_reader);
             for (comp_idx, comp) in comp_data.iter_mut().enumerate() {
                 let plan = &mcu_plan[comp_idx];
 

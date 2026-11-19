@@ -2184,6 +2184,7 @@ impl<'a> Decoder<'a> {
                         mcu_decoder.reset();
                     }
 
+                    mcu_decoder.start_mcu(&bit_reader);
                     for (comp_idx, layout) in comp_layouts.iter().enumerate() {
                         let qt_values: &[u16; 64] = &quant_tables[comp_idx].values;
                         let plan = &mcu_plan[comp_idx];
@@ -2239,6 +2240,7 @@ impl<'a> Decoder<'a> {
 
                     let mut mcu_error = false;
 
+                    mcu_decoder.start_mcu(&bit_reader);
                     for (comp_idx, layout) in comp_layouts.iter().enumerate() {
                         let qt_values = &quant_tables[comp_idx].values;
                         let plan = &mcu_plan[comp_idx];
@@ -2466,6 +2468,7 @@ impl<'a> Decoder<'a> {
                         }
                         mcu_decoder.reset();
                     }
+                    mcu_decoder.start_mcu(&bit_reader);
 
                     // Decode one 8x8 block
                     match mcu_decoder.decode_block(
@@ -6688,6 +6691,7 @@ impl<'a> Decoder<'a> {
                     }
                 }
 
+                mcu_decoder.start_mcu(&reader);
                 for (comp_idx, layout) in comp_layouts.iter().enumerate() {
                     let qt_values: &[u16; 64] = &quant_tables[comp_idx].values;
                     let plan = &mcu_plan[comp_idx];

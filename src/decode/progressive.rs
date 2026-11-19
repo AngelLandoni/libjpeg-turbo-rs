@@ -53,6 +53,9 @@ pub fn decode_dc_first(
     coeffs: &mut [i16; 64],
     al: u8,
 ) -> Result<()> {
+    if reader.exhausted() {
+        return Ok(());
+    }
     let dc_diff = huffman::decode_dc_coefficient(reader, dc_table)?;
     *dc_pred = dc_pred.wrapping_add(dc_diff);
     coeffs[0] = *dc_pred << al;
@@ -63,6 +66,9 @@ pub fn decode_dc_first(
 /// Adds one bit at position `al` to existing coeffs\[0\].
 #[inline]
 pub fn decode_dc_refine(reader: &mut BitReader, coeffs: &mut [i16; 64], al: u8) -> Result<()> {
+    if reader.exhausted() {
+        return Ok(());
+    }
     let bit = reader.read_bits(1);
     if bit != 0 {
         coeffs[0] |= 1i16 << al;
@@ -94,6 +100,9 @@ pub(crate) fn decode_ac_first_tracked(
             "progressive AC-first scan bounds: ss={} se={}",
             ss, se
         )));
+    }
+    if reader.exhausted() {
+        return Ok(());
     }
     if *eob_run > 0 {
         *eob_run -= 1;
@@ -211,6 +220,9 @@ pub(crate) fn decode_ac_refine_tracked(
             "progressive AC-refine scan bounds: ss={} se={}",
             ss, se
         )));
+    }
+    if reader.exhausted() {
+        return Ok(());
     }
     let p1: i16 = 1i16 << al;
     let m1: i16 = (-1i16) << al;
