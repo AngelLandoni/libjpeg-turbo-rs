@@ -148,6 +148,10 @@ pub struct MarkerReader<'a> {
     /// Parse-time SOS cap (issue #355): bounds ScanInfo buffering while
     /// markers are read, before any decode-time limit can apply.
     scan_cap: usize,
+    /// Where the marker after the last scan of a progressive frame starts.
+    scanned: Option<usize>,
+    /// Where the markers end, as at EOI, when a marker after the scans failed.
+    end: Option<usize>,
 }
 
 impl<'a> MarkerReader<'a> {
@@ -157,6 +161,8 @@ impl<'a> MarkerReader<'a> {
             pos: 0,
             marker_save_config: MarkerSaveConfig::None,
             scan_cap: DEFAULT_PARSE_SCAN_CAP,
+            scanned: None,
+            end: None,
         }
     }
 
@@ -210,7 +216,29 @@ impl<'a> MarkerReader<'a> {
 
     /// Parse all markers. For baseline, stops after first SOS.
     /// For progressive, reads all SOS markers until EOI.
+    ///
+    /// A marker that fails after a scan of a progressive frame ends the markers there, as EOI
+    /// would, when an EOI marker follows it: the frame decodes from the scans before it. C
+    /// libjpeg-turbo fails such a file, but every coefficient of its scans is there. A file whose
+    /// bytes end before an EOI marker, and a parse limit, still fail.
     pub fn read_markers(&mut self) -> Result<JpegMetadata> {
+        let start: usize = self.pos;
+        self.scanned = None;
+        self.end = None;
+        match self.read_markers_to_end() {
+            Err(error) if !matches!(error, JpegError::LimitExceeded { .. }) => match self.scanned {
+                Some(end) if self.data[end..].windows(2).any(|marker| marker == [0xFF, EOI]) => {
+                    self.pos = start;
+                    self.end = Some(end);
+                    self.read_markers_to_end()
+                }
+                _ => Err(error),
+            },
+            result => result,
+        }
+    }
+
+    fn read_markers_to_end(&mut self) -> Result<JpegMetadata> {
         self.expect_marker(SOI)?;
 
         let mut frame: Option<FrameHeader> = None;
@@ -255,6 +283,12 @@ impl<'a> MarkerReader<'a> {
             }
         };
         loop {
+            if frame.as_ref().is_some_and(|f| f.is_progressive) && !scans.is_empty() {
+                self.scanned = Some(self.pos);
+            }
+            if self.end.is_some_and(|end| self.pos >= end) {
+                break;
+            }
             let marker = self.read_marker()?;
             match marker {
                 SOF0 | SOF1 => {
@@ -1278,6 +1312,37 @@ mod tests {
                 meta.is_arithmetic,
             );
         }
+    }
+
+    /// A marker that fails after a scan of a progressive frame ends the markers there, and the
+    /// frame keeps its scans. The same marker before the frame fails it.
+    #[test]
+    fn a_bad_marker_after_a_progressive_scan_ends_the_markers() {
+        let jpeg: Vec<u8> = make_minimal_jpeg(0xC2);
+        let eoi: usize = jpeg.len() - 2;
+        let bad: [&[u8]; 4] = [
+            &[0xFF, 0xC4, 0x00, 0x03, 0xFF],
+            &[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x09, 0x00, 0x00, 0x3F, 0x00],
+            &[0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x08, 0x00, 0x08, 0x01, 0x01, 0x11, 0x00],
+            &[0xFF, 0x02, 0xFF, 0xD9],
+        ];
+        for segment in bad {
+            let late: Vec<u8> = [&jpeg[..eoi], segment, &jpeg[eoi..]].concat();
+            let meta: JpegMetadata = MarkerReader::new(&late)
+                .read_markers()
+                .unwrap_or_else(|e| panic!("{segment:02X?} after the scan: {e:?}"));
+            assert_eq!(meta.scans.len(), 1, "{segment:02X?}: the scans before it");
+        }
+        let cut: Vec<u8> = [&jpeg[..eoi], bad[0]].concat();
+        assert!(
+            MarkerReader::new(&cut).read_markers().is_err(),
+            "a bad DHT where the bytes end, with no EOI after it, fails"
+        );
+        let early: Vec<u8> = [&jpeg[..2], bad[1], &jpeg[2..]].concat();
+        assert!(
+            MarkerReader::new(&early).read_markers().is_err(),
+            "a bad SOS before the frame fails"
+        );
     }
 
     /// An APPn or COM segment whose length is below 2 is an empty body, as C jdmarker.c
